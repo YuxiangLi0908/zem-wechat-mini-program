@@ -15,6 +15,8 @@
    - 用户类型用于后续权限判断
 """
 import jwt
+from typing import Any, Type
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from passlib.context import CryptContext
 from sqlalchemy.exc import SQLAlchemyError
@@ -36,10 +38,17 @@ def _verify_password(pwd_context: CryptContext, plain_password: str, hashed_pass
         return False
 
 
-def _safe_query_user(db: Session, model: type, username: str):
-    """Query user table and convert SQL failures to 503 responses"""
+def _safe_query_by_attr(db: Session, model: Type[Any], attr: str, value: str):
+    """Safely query a model by attribute, translating SQL problems to HTTP errors"""
     try:
-        return db.query(model).filter(model.username == username).first()
+        column = getattr(model, attr)
+    except AttributeError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Model {model.__name__} has no attribute '{attr}'",
+        )
+    try:
+        return db.query(model).filter(column == value).first()
     except SQLAlchemyError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -89,35 +98,27 @@ async def login(
             "user_type": "customer"
         }
     """
-    if not request.username or not request.password:
+    if not request.username:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username and password are required",
+            detail="Username is required",
         )
 
     username = request.username.strip()
     password = request.password
-
+    
     # Django PBKDF2-SHA256 密码验证上下文
     pwd_context = CryptContext(schemes=["django_pbkdf2_sha256"], deprecated="auto")
 
-    # 【步骤1】优先查询 Customer 表（客户用户）
-    customer = _safe_query_user(db, Customer, username)
+    # 【步骤1】根据 zem_name 查询 Customer 表（客户用户），直接返回客户登录
+    customer = _safe_query_by_attr(db, Customer, "zem_name", username)
     
     if customer:
-        # 找到客户用户，验证密码
-        if not _verify_password(pwd_context, password, customer.password):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid credentials / 密码错误"
-            )
-        
-
-        # 生成 JWT token（客户用户）
+        display_name = customer.full_name or customer.zem_name
         token = jwt.encode(
             {
-                "user_name": customer.username,
-                "display_name": customer.zem_name,
+                "user_name": customer.username or customer.zem_name,
+                "display_name": display_name,
                 "user_type": "customer",
             },
             app_config.SECRET_KEY,
@@ -125,13 +126,19 @@ async def login(
         )
 
         return UserAuth(
-            user=customer.zem_name,
+            user=display_name,
             access_token=token,
             user_type="customer",
         )
     
-    # 【步骤2】Customer 表无该用户，查询 AuthUser 表（员工用户）
-    staff = _safe_query_user(db, AuthUser, username)
+    # 【步骤2】Customer 表无该用户，验证密码后查询 AuthUser 表（员工用户）
+    if not password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password is required for staff login",
+        )
+
+    staff = _safe_query_by_attr(db, AuthUser, "username", username)
     
     if staff:
         # 检查员工账户是否激活

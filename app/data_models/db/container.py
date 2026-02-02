@@ -2,7 +2,7 @@
 集装箱（Container）数据模型
 存储集装箱的基本信息
 """
-from sqlalchemy import Boolean, Column, Float, Integer, String
+from sqlalchemy import Boolean, Column, Float, Integer, Index, String
 
 from app.data_models.db.base import Base
 
@@ -21,3 +21,7 @@ class Container(Base):
     weight_lbs = Column(Float, nullable=True)
     is_special_container = Column(Boolean, nullable=True, default=False)
     note = Column(String(100), nullable=True)
+
+    __table_args__ = (
+        Index("ix_container_container_number", "container_number"),
+    )
