@@ -65,7 +65,6 @@ class OrderTracking:
         self.user = user
         self.container_number = container_number
         self.db_session = db_session
-        # 使用上海时区进行时间转换
         self.tz = pytz.timezone("Asia/Shanghai")
 
     def build_order_full_history(self) -> OrderResponse:
@@ -81,37 +80,40 @@ class OrderTracking:
         Returns:
             OrderResponse: 完整的订单追踪响应
         """
-        # 首先进行权限验证和港前数据查询
-        preport, has_permission, order_owner = self._build_preport_history()
-        
-        # 【权限判断】
-        if not has_permission:
-            # 客户无权限查看此柜号
+        try:
+            preport, has_permission, order_owner = self._build_preport_history()
+            
+            if not has_permission:
+                return OrderResponse(
+                    preport_timenode=None,
+                    postport_timenode=None,
+                    has_permission=False,
+                    message=f"您没有权限查看柜号 {self.container_number} 的详情，该柜子归属于其他客户",
+                )
+            
+            if preport is None:
+                return OrderResponse(
+                    preport_timenode=None,
+                    postport_timenode=None,
+                    has_permission=True,
+                    message=f"未找到柜号 {self.container_number} 的相关信息",
+                )
+            
+            postport = self._build_postport_history()
+            
             return OrderResponse(
-                preport_timenode=None,
-                postport_timenode=None,
-                has_permission=False,
-                message=f"您没有权限查看柜号 {self.container_number} 的详情，该柜子归属于其他客户",
-            )
-        
-        # 如果柜号不存在
-        if preport is None:
-            return OrderResponse(
-                preport_timenode=None,
-                postport_timenode=None,
+                preport_timenode=preport,
+                postport_timenode=postport,
                 has_permission=True,
-                message=f"未找到柜号 {self.container_number} 的相关信息",
+                message=None,
             )
-        
-        # 构建港后数据
-        postport = self._build_postport_history()
-        
-        return OrderResponse(
-            preport_timenode=preport,
-            postport_timenode=postport,
-            has_permission=True,
-            message=None,
-        )
+        except Exception as e:
+            # 捕获所有异常，返回友好提示+打印错误日志
+            print(f"Order tracking error: {str(e)}")  # 输出到Azure日志
+            raise HTTPException(
+                status_code=400,
+                detail=f"查询柜号 {self.container_number} 失败：{str(e)}"
+            )
 
     def _build_preport_history(self) -> tuple[Optional[OrderPreportResponse], bool, Optional[str]]:
         """
@@ -125,104 +127,91 @@ class OrderTracking:
         Returns:
             tuple: (港前数据, 是否有权限, 订单所属客户名称)
         """
-        # 查询订单数据，关联加载所有相关信息
         order_data = (
             self.db_session.query(Order)
             .join(Order.container)
             .options(
-                joinedload(Order.user),      # 关联客户信息
-                joinedload(Order.container), # 关联集装箱信息
-                joinedload(Order.warehouse), # 关联仓库信息
-                joinedload(Order.vessel),    # 关联船舶信息
-                joinedload(Order.retrieval), # 关联提柜信息
-                joinedload(Order.offload),   # 关联卸货信息
+                joinedload(Order.user),
+                joinedload(Order.container),
+                joinedload(Order.warehouse),
+                joinedload(Order.vessel),
+                joinedload(Order.retrieval),
+                joinedload(Order.offload),
             )
             .filter(Container.container_number == self.container_number)
             .first()
         )
         
-        # 柜号不存在
         if not order_data:
             return None, True, None
         
-        # 获取订单所属客户信息
-        order_owner_zem_name = order_data.user.zem_name if order_data.user else None
+        # 修复：空值判断（order_data.user可能为None）
+        order_owner_zem_name = order_data.user.zem_name if (order_data.user and hasattr(order_data.user, 'zem_name')) else None
         
-        # 【权限验证】
-        # 员工用户：无需验证，直接通过
-        # 客户用户：需验证柜号归属
-        if self.user.is_customer:
-            # 客户用户必须验证柜号归属
-            if order_owner_zem_name != self.user.zem_name:
-                # 归属不匹配，无权限查看
-                return None, False, order_owner_zem_name
+        if self.user.is_customer and order_owner_zem_name != self.user.zem_name:
+            return None, False, order_owner_zem_name
         
-        # 有权限，构建港前轨迹数据
         order_dict = OrderPreportResponse.model_validate(order_data).model_dump()
         preport_history = []
-        pod = None  # 目的港口
+        pod = None
         
-        # 1. 订单创建事件
-        if order_dict["created_at"]:
+        # 1. 订单创建事件（空值判断）
+        if order_dict.get("created_at"):
             preport_history.append({
                 "status": "ORDER_CREATED",
-                "description": f"创建订单: {order_dict['container']['container_number']}",
+                "description": f"创建订单: {order_dict.get('container', {}).get('container_number', '未知柜号')}",
                 "timestamp": self._convert_tz(order_dict["created_at"]),
             })
         
-        # 2. 港口相关事件（需要 T49 追踪）
-        if order_dict["add_to_t49"]:
-            pod = order_dict["vessel"]["destination_port"] if order_dict["vessel"] else None
+        # 2. 港口相关事件（修复：多层级空值判断）
+        if order_dict.get("add_to_t49"):
+            vessel = order_dict.get("vessel", {})
+            pod = vessel.get("destination_port") if vessel else None
             
-            # 到达港口
-            if order_dict["retrieval"] and order_dict["retrieval"]["temp_t49_pod_arrive_at"]:
+            retrieval = order_dict.get("retrieval", {})
+            if retrieval and retrieval.get("temp_t49_pod_arrive_at"):
                 preport_history.append({
                     "status": "ARRIVED_AT_PORT",
-                    "description": f"到达港口: {pod}",
+                    "description": f"到达港口: {pod or '未知港口'}",
                     "location": pod,
-                    "timestamp": self._convert_tz(order_dict["retrieval"]["temp_t49_pod_arrive_at"]),
+                    "timestamp": self._convert_tz(retrieval["temp_t49_pod_arrive_at"]),
                 })
             
-            # 港口卸货
-            if order_dict["retrieval"] and order_dict["retrieval"]["temp_t49_pod_discharge_at"]:
+            if retrieval and retrieval.get("temp_t49_pod_discharge_at"):
                 preport_history.append({
                     "status": "PORT_UNLOADING",
                     "description": "港口卸货",
                     "location": pod,
-                    "timestamp": self._convert_tz(order_dict["retrieval"]["temp_t49_pod_discharge_at"]),
+                    "timestamp": self._convert_tz(retrieval["temp_t49_pod_discharge_at"]),
                 })
         
-        # 3. 提柜相关事件
-        if order_dict["retrieval"]:
-            retrieval = order_dict["retrieval"]
-            
-            # 预约提柜
-            if retrieval["scheduled_at"]:
-                target_time = self._convert_tz(retrieval["target_retrieval_timestamp"])
+        # 3. 提柜相关事件（修复：空值判断）
+        retrieval = order_dict.get("retrieval", {})
+        if retrieval:
+            if retrieval.get("scheduled_at"):
+                target_time = self._convert_tz(retrieval.get("target_retrieval_timestamp"))
                 preport_history.append({
                     "status": "PORT_PICKUP_SCHEDULED",
-                    "description": f"预约港口提柜: 预计提柜时间 {target_time}",
+                    "description": f"预约港口提柜: 预计提柜时间 {target_time or '未知时间'}",
                     "location": pod,
                     "timestamp": self._convert_tz(retrieval["scheduled_at"]),
                 })
             
-            # 到达仓库
-            if retrieval["arrive_at_destination"]:
+            if retrieval.get("arrive_at_destination"):
+                location = retrieval.get("retrieval_destination_precise") or "未知仓点"
                 preport_history.append({
                     "status": "ARRIVE_AT_WAREHOUSE",
-                    "description": f"港口提柜完成, 货柜到达目的仓点 {retrieval['retrieval_destination_precise']}",
-                    "location": retrieval["retrieval_destination_precise"],
-                    "timestamp": self._convert_tz(retrieval["arrive_at"]),
+                    "description": f"港口提柜完成, 货柜到达目的仓点 {location}",
+                    "location": location,
+                    "timestamp": self._convert_tz(retrieval.get("arrive_at")),
                 })
         
-        # 4. 卸货/拆柜事件
-        if order_dict["offload"]:
-            offload = order_dict["offload"]
-            retrieval = order_dict["retrieval"]
-            
-            # 拆柜完成
-            if offload["offload_at"]:
-                location = retrieval["retrieval_destination_precise"] if retrieval else None
+        # 4. 卸货/拆柜事件（修复：空值判断）
+        offload = order_dict.get("offload", {})
+        retrieval = order_dict.get("retrieval", {})
+        if offload:
+            if offload.get("offload_at"):
+                location = retrieval.get("retrieval_destination_precise") if retrieval else None
                 preport_history.append({
                     "status": "OFFLOAD",
                     "description": "拆柜完成",
@@ -230,12 +219,11 @@ class OrderTracking:
                     "timestamp": self._convert_tz(offload["offload_at"]),
                 })
             
-            # 空箱归还
-            if retrieval and retrieval["empty_returned"]:
+            if retrieval and retrieval.get("empty_returned"):
                 preport_history.append({
                     "status": "EMPTY_RETURN",
                     "description": "已归还空箱",
-                    "timestamp": self._convert_tz(retrieval["empty_returned_at"]),
+                    "timestamp": self._convert_tz(retrieval.get("empty_returned_at")),
                 })
         
         order_dict["history"] = preport_history
@@ -243,15 +231,17 @@ class OrderTracking:
 
     def _build_postport_history(self) -> OrderPostportResponse:
         """
-        构建港后轨迹数据
+        构建港前轨迹数据，同时进行权限验证
         
-        查询托盘运输批次信息，按目的地和 PO_ID 分组汇总
+        【权限验证逻辑】
+        1. 查询柜号对应的订单
+        2. 如果是客户用户，检查订单的 customer_name_id 是否匹配
+        3. 员工用户直接通过验证
         
         Returns:
-            OrderPostportResponse: 港后轨迹响应
+            tuple: (港前数据, 是否有权限, 订单所属客户名称)
         """
         try:
-            # 查询托盘运输批次数据
             results = (
                 self.db_session.query(
                     Pallet.destination,
@@ -269,9 +259,10 @@ class OrderTracking:
                     Shipment.arrived_at_utc.label("arrived_at"),
                     Shipment.pod_link,
                     Shipment.pod_uploaded_at,
-                    func.round(cast(func.sum(Pallet.cbm), Numeric), 4).label("cbm"),
+                    # 修复：sum空值处理（coalesce将None转为0）
+                    func.round(cast(func.coalesce(func.sum(Pallet.cbm), 0), Numeric), 4).label("cbm"),
                     func.round(
-                        cast(func.sum(Pallet.weight_lbs) / 2.20462, Numeric), 2
+                        cast(func.coalesce(func.sum(Pallet.weight_lbs), 0) / 2.20462, Numeric), 2
                     ).label("weight_kg"),
                     func.count(distinct(Pallet.id)).label("n_pallet"),
                     func.count(Pallet.pcs).label("pcs"),
@@ -299,10 +290,9 @@ class OrderTracking:
                 .all()
             )
         except Exception as e:
-            # 查询异常时返回空的港后数据
+            print(f"Postport query error: {str(e)}")
             return OrderPostportResponse(shipment=[])
         
-        # 构建运输批次汇总数据
         data = [
             PalletShipmentSummary(
                 destination=row[0],
@@ -341,5 +331,12 @@ class OrderTracking:
             转换后的时间（不带时区信息）
         """
         if not ts:
-            return ts
-        return ts.astimezone(self.tz).replace(tzinfo=None)
+            return None
+        try:
+            # 如果ts没有tzinfo，先添加UTC时区
+            if ts.tzinfo is None:
+                ts = pytz.UTC.localize(ts)
+            return ts.astimezone(self.tz).replace(tzinfo=None)
+        except Exception as e:
+            print(f"Timezone convert error: {str(e)}")
+            return ts  # 转换失败时返回原时间
