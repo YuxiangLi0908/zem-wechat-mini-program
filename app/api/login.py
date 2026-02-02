@@ -17,6 +17,7 @@
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, status
 from passlib.context import CryptContext
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.data_models.db.user import Customer, AuthUser
@@ -33,6 +34,17 @@ def _verify_password(pwd_context: CryptContext, plain_password: str, hashed_pass
         return pwd_context.verify(plain_password, hashed_password)
     except (ValueError, TypeError):
         return False
+
+
+def _safe_query_user(db: Session, model: type, username: str):
+    """Query user table and convert SQL failures to 503 responses"""
+    try:
+        return db.query(model).filter(model.username == username).first()
+    except SQLAlchemyError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database temporarily unavailable, please retry later",
+        )
 
 router = APIRouter()
 
@@ -90,7 +102,7 @@ async def login(
     pwd_context = CryptContext(schemes=["django_pbkdf2_sha256"], deprecated="auto")
 
     # 【步骤1】优先查询 Customer 表（客户用户）
-    customer = db.query(Customer).filter(Customer.username == username).first()
+    customer = _safe_query_user(db, Customer, username)
     
     if customer:
         # 找到客户用户，验证密码
@@ -119,7 +131,7 @@ async def login(
         )
     
     # 【步骤2】Customer 表无该用户，查询 AuthUser 表（员工用户）
-    staff = db.query(AuthUser).filter(AuthUser.username == request.username).first()
+    staff = _safe_query_user(db, AuthUser, username)
     
     if staff:
         # 检查员工账户是否激活
