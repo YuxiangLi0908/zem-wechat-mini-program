@@ -7,6 +7,8 @@ from sqlalchemy.orm import relationship
 
 from app.data_models.db.base import Base
 
+from app.data_models.db.fleet import Fleet
+
 
 class Shipment(Base):
     """
@@ -68,4 +70,9 @@ class Shipment(Base):
     express_number = Column(String(255), nullable=True)
 
     # 关联关系
-    fleet = relationship("Fleet", backref="shipments")
+    fleet = relationship(
+        "Fleet",
+        backref="shipment",  # 严格匹配Django的related_name="shipment"
+        foreign_keys=[fleet_number_id],
+        lazy="select"
+    )
