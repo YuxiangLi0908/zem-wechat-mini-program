@@ -105,7 +105,7 @@ class RetrievalResponse(BaseModel):
     arrive_at: Optional[datetime]
     empty_returned: Optional[bool]
     empty_returned_at: Optional[datetime]
-    temp_t49_lfd: Optional[date]
+    temp_t49_lfd: Optional[datetime]
     temp_t49_available_for_pickup: Optional[bool]
     temp_t49_pod_arrive_at: Optional[datetime]
     temp_t49_pod_discharge_at: Optional[datetime]
