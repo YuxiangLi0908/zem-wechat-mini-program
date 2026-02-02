@@ -24,6 +24,16 @@ from app.data_models.login import LoginRequest, UserAuth
 from app.services.config import app_config
 from app.services.db_session import db_session
 
+
+def _verify_password(pwd_context: CryptContext, plain_password: str, hashed_password: str) -> bool:
+    """Avoid raising when hash is missing or malformed"""
+    if not hashed_password:
+        return False
+    try:
+        return pwd_context.verify(plain_password, hashed_password)
+    except (ValueError, TypeError):
+        return False
+
 router = APIRouter()
 
 
@@ -67,35 +77,45 @@ async def login(
             "user_type": "customer"
         }
     """
+    if not request.username or not request.password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username and password are required",
+        )
+
+    username = request.username.strip()
+    password = request.password
+
     # Django PBKDF2-SHA256 密码验证上下文
     pwd_context = CryptContext(schemes=["django_pbkdf2_sha256"], deprecated="auto")
-    
+
     # 【步骤1】优先查询 Customer 表（客户用户）
-    customer = db.query(Customer).filter(Customer.username == request.username).first()
+    customer = db.query(Customer).filter(Customer.username == username).first()
     
     if customer:
         # 找到客户用户，验证密码
-        if not pwd_context.verify(request.password, customer.password):
+        if not _verify_password(pwd_context, password, customer.password):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid credentials / 密码错误"
             )
         
+
         # 生成 JWT token（客户用户）
         token = jwt.encode(
             {
                 "user_name": customer.username,
                 "display_name": customer.zem_name,
-                "user_type": "customer",  # 【关键】标记为客户用户
+                "user_type": "customer",
             },
             app_config.SECRET_KEY,
             algorithm=app_config.JWT_ALGO,
         )
-        
+
         return UserAuth(
             user=customer.zem_name,
             access_token=token,
-            user_type="customer"
+            user_type="customer",
         )
     
     # 【步骤2】Customer 表无该用户，查询 AuthUser 表（员工用户）
@@ -110,7 +130,7 @@ async def login(
             )
         
         # 验证密码
-        if not pwd_context.verify(request.password, staff.password):
+        if not _verify_password(pwd_context, password, staff.password):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid credentials / 密码错误"
