@@ -35,7 +35,7 @@ class Retrieval(Base):
     arrive_at = Column(DateTime, nullable=True)
     empty_returned = Column(Boolean, nullable=True)
     empty_returned_at = Column(DateTime, nullable=True)
-    temp_t49_lfd = Column(Date, nullable=True)
+    temp_t49_lfd = Column(DateTime, nullable=True)
     temp_t49_available_for_pickup = Column(Boolean, nullable=True)
     temp_t49_pod_arrive_at = Column(DateTime, nullable=True)
     temp_t49_pod_discharge_at = Column(DateTime, nullable=True)
