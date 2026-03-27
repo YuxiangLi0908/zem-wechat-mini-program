@@ -36,3 +36,6 @@ class FreightInquiryResponse(BaseModel):
     quotes: List[QuoteResult] = Field(default_factory=list, description="报价结果列表")
     quotation_name: Optional[str] = Field(None, description="使用的报价表名称")
     message: Optional[str] = Field(None, description="提示信息")
+    input_pallets: Optional[int] = Field(None, description="输入的板数")
+    input_cbm: Optional[float] = Field(None, description="输入的CBM")
+    final_pallet: Optional[float] = Field(None, description="最终计算的板数")
