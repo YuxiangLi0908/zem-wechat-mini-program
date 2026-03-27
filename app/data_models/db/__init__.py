@@ -11,6 +11,7 @@ from app.data_models.db.vessel import Vessel
 from app.data_models.db.warehouse import Warehouse
 from app.data_models.db.retrieval import Retrieval
 from app.data_models.db.offload import Offload
+from app.data_models.db.quotation import QuotationMaster, FeeDetail
 
 __all__ = [
     "Base",
@@ -24,4 +25,6 @@ __all__ = [
     "Warehouse",
     "Retrieval",
     "Offload",
+    "QuotationMaster",
+    "FeeDetail",
 ]
