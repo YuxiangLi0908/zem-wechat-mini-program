@@ -50,7 +50,7 @@ class FeeDetail(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     fee_detail_id = Column(String(200), nullable=True)
-    quotation_id = Column(Integer, ForeignKey("warehouse_quotationmaster.id"), nullable=True)
+    quotation_id_id = Column(Integer, ForeignKey("warehouse_quotationmaster.id"), nullable=True, name="quotation_id_id")
     fee_type = Column(String(255), nullable=True)
     warehouse = Column(String(20), nullable=True)
     details = Column(JSONB, default=dict)
@@ -59,6 +59,6 @@ class FeeDetail(Base):
     quotation = relationship("QuotationMaster", backref="fee_details")
 
     __table_args__ = (
-        Index("ix_feedetail_quotation_id", "quotation_id"),
+        Index("ix_feedetail_quotation_id_id", "quotation_id_id"),
         Index("ix_feedetail_fee_type", "fee_type"),
     )
