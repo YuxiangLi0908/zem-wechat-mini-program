@@ -266,7 +266,7 @@ def calculate_public_price(
     if rate_found:
         cacl_pallet = _calculate_total_pallet(cbm, is_niche_warehouse)
         final_pallet = max(cacl_pallet, pallets)
-        amount = rate * final_pallet
+        amount = float(rate) * float(final_pallet)
         results.append(
             QuoteResult(
                 warehouse=warehouse,
@@ -380,6 +380,7 @@ async def get_freight_inquiry(
 
         warehouses = ["NJ", "SAV", "LA"]
         quotes: List[QuoteResult] = []
+        final_pallet_global = None
 
         for warehouse in warehouses:
             fee_types = {
@@ -415,7 +416,8 @@ async def get_freight_inquiry(
                     container_type=request.container_type,
                     quotation_name=quotation.filename or "",
                 )
-                quotes.append(combina_result)
+                if combina_result.rate_found:
+                    quotes.append(combina_result)
 
             public_key = f"{warehouse}_PUBLIC"
             if public_key in fees_dict:
@@ -427,13 +429,27 @@ async def get_freight_inquiry(
                     destination=request.destination,
                     quotation_name=quotation.filename or "",
                 )
-                quotes.extend(public_results)
+                for public_result in public_results:
+                    if public_result.rate_found:
+                        quotes.append(public_result)
+                        if final_pallet_global is None and public_result.rate_found:
+                            niche_warehouse_str = fees_dict[public_key].niche_warehouse or ""
+                            niche_warehouse_list = [x.strip() for x in niche_warehouse_str.split(",") if x.strip()]
+                            is_niche_warehouse = request.destination in niche_warehouse_list
+                            cacl_pallet = _calculate_total_pallet(request.cbm, is_niche_warehouse)
+                            final_pallet_global = max(cacl_pallet, request.pallets)
+
+        if final_pallet_global is None:
+            final_pallet_global = request.pallets
 
         return FreightInquiryResponse(
             success=True,
             quotes=quotes,
             quotation_name=quotation.filename,
             message=None,
+            input_pallets=request.pallets,
+            input_cbm=request.cbm,
+            final_pallet=final_pallet_global,
         )
 
     except Exception as e:
