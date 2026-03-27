@@ -395,7 +395,7 @@ async def get_freight_inquiry(
                 db.query(FeeDetail)
                 .filter(
                     and_(
-                        FeeDetail.quotation_id == quotation.id,
+                        FeeDetail.quotation_id_id == quotation.id,
                         FeeDetail.fee_type.in_(fee_types),
                     )
                 )
