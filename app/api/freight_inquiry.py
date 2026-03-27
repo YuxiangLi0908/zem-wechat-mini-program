@@ -24,7 +24,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import and_, desc
 from sqlalchemy.orm import Session
 
-from app.data_models.db import QuotationMaster, FeeDetail
+from app.data_models.db.quotation import QuotationMaster, FeeDetail
 from app.data_models.freight_inquiry import (
     FreightInquiryRequest,
     FreightInquiryResponse,
@@ -240,8 +240,9 @@ def calculate_public_price(
     details = (
         {"LA_AMAZON": rules} if "LA" in warehouse and "LA_AMAZON" not in rules else rules
     )
-    niche_warehouse = fee_detail.niche_warehouse or []
-    if destination in niche_warehouse:
+    niche_warehouse_str = fee_detail.niche_warehouse or ""
+    niche_warehouse_list = [x.strip() for x in niche_warehouse_str.split(",") if x.strip()]
+    if destination in niche_warehouse_list:
         is_niche_warehouse = True
     else:
         is_niche_warehouse = False
