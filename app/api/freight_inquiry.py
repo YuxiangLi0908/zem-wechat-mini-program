@@ -7,7 +7,9 @@
 3. 同时计算组合柜和转运方式价格
 
 【业务规则】
-1. 查询最新报价表：effective_date <= 当前日期，is_user_exclusive=False，quote_type='receivable'
+1. 查询最新报价表：
+   - 优先查找 is_user_exclusive=True 且 exclusive_user=当前用户的报价
+   - 如果找不到，再找 is_user_exclusive=False 的通用报价
 2. 按仓库查询费用详情：
    - NJ: NJ_LOCAL, NJ_PUBLIC, NJ_COMBINA
    - SAV: SAV_PUBLIC, SAV_COMBINA
@@ -34,36 +36,112 @@ from app.services.user_auth import get_current_user, CurrentUser
 router = APIRouter()
 
 
-def get_latest_quotation(db: Session) -> Optional[QuotationMaster]:
+def get_latest_quotation(db: Session, current_user: CurrentUser) -> Optional[QuotationMaster]:
     """
     获取最新的报价表
     
+    【查询优先级】
+    1. 优先查找用户专属报价：is_user_exclusive=True, exclusive_user=当前用户名
+    2. 如果找不到，再找通用报价：is_user_exclusive=False
+    
     Args:
         db: 数据库会话
+        current_user: 当前登录用户
     
     Returns:
         最新的报价表，如果没有则返回None
     """
     today = date.today()
-    return (
+    
+    quotation = (
         db.query(QuotationMaster)
         .filter(
             and_(
                 QuotationMaster.effective_date <= today,
-                QuotationMaster.is_user_exclusive == False,
+                QuotationMaster.is_user_exclusive == True,
+                QuotationMaster.exclusive_user == current_user.zem_name,
                 QuotationMaster.quote_type == "receivable",
             )
         )
         .order_by(desc(QuotationMaster.effective_date))
         .first()
     )
+    
+    if not quotation:
+        quotation = (
+            db.query(QuotationMaster)
+            .filter(
+                and_(
+                    QuotationMaster.effective_date <= today,
+                    QuotationMaster.is_user_exclusive == False,
+                    QuotationMaster.quote_type == "receivable",
+                )
+            )
+            .order_by(desc(QuotationMaster.effective_date))
+            .first()
+        )
+    
+    return quotation
 
+def _process_destination(destination_origin):
+    """处理目的地字符串"""
+
+    def clean_all_spaces(s):
+        if not s:
+            return ""
+        import re
+        cleaned = re.sub(r'[\xa0\u3000\s]+', '', str(s))
+        return cleaned
+    
+    destination_origin = str(destination_origin)
+
+    if "改" in destination_origin or "送" in destination_origin:
+        first_change_pos = min(
+            (destination_origin.find(char) for char in ["改", "送"] 
+            if destination_origin.find(char) != -1),
+            default=-1
+        )
+        
+        if first_change_pos != -1:
+            first_part = destination_origin[:first_change_pos + 1]
+            second_part = destination_origin[first_change_pos + 1:]
+            
+            if "-" in first_part:
+                if first_part.upper().startswith("UPS-"):
+                    first_result = first_part
+                else:
+                    first_result = first_part.split("-", 1)[1]
+            else:
+                first_result = first_part
+            
+            if "-" in second_part:
+                if second_part.upper().startswith("UPS-"):
+                    second_result = second_part
+                else:
+                    second_result = second_part.split("-", 1)[1]
+            else:
+                second_result = second_part
+            
+            return clean_all_spaces(first_result), clean_all_spaces(second_result)
+        else:
+            raise ValueError(first_change_pos)
+    
+    if "-" in destination_origin:
+        if destination_origin.upper().startswith("UPS-"):
+            second_result = destination_origin
+        else:
+            second_result = destination_origin.split("-", 1)[1]
+    else:
+        second_result = destination_origin
+    
+    return None, clean_all_spaces(second_result)
 
 def calculate_combina_price(
     warehouse: str,
     fee_detail: FeeDetail,
     pallets: int,
     cbm: Optional[float],
+    destination: Optional[str],
     container_cbm: Optional[float],
     container_type: Optional[str],
     quotation_name: str,
@@ -83,7 +161,7 @@ def calculate_combina_price(
     Returns:
         报价结果
     """
-    if not cbm or not container_cbm or not container_type:
+    if not cbm or not container_type:
         return QuoteResult(
             warehouse=warehouse,
             quote_type="COMBINA",
@@ -94,31 +172,39 @@ def calculate_combina_price(
     rules = fee_detail.details or {}
     container_type_temp = 0 if "40" in container_type else 1
 
+    destination_origin, destination = _process_destination(destination)
+
     try:
-        rate_table = rules.get(str(container_type_temp), {})
-        rate = None
-        
-        for min_cbm, rate_value in sorted(rate_table.items(), key=lambda x: float(x[0])):
-            if cbm >= float(min_cbm):
-                rate = float(rate_value)
-        
-        if rate is None:
+        is_combina_region = False
+        rate = 0
+        for region, region_data in rules.items():
+            for item in region_data:
+                normalized_locations = [loc.strip() for loc in item["location"] if loc]
+                if destination in normalized_locations:
+                    is_combina_region = True
+                    price_group = item["prices"]
+                    rate = price_group[container_type_temp]
+                    break
+            if is_combina_region:
+                break
+        if destination.upper() == "UPS":
+            is_combina_region = False
+        if is_combina_region:
+            return QuoteResult(
+                warehouse=warehouse,
+                quote_type="COMBINA",
+                rate_found=True,
+                rate=rate,
+                amount=rate,
+                message=f"组合柜报价 ({container_type})",
+            )
+        else:
             return QuoteResult(
                 warehouse=warehouse,
                 quote_type="COMBINA",
                 rate_found=False,
                 message="未找到匹配的组合柜费率",
             )
-
-        amount = rate * pallets
-        return QuoteResult(
-            warehouse=warehouse,
-            quote_type="COMBINA",
-            rate_found=True,
-            rate=rate,
-            amount=amount,
-            message=f"组合柜报价 ({container_type})",
-        )
     except Exception as e:
         return QuoteResult(
             warehouse=warehouse,
@@ -132,6 +218,8 @@ def calculate_public_price(
     warehouse: str,
     fee_detail: FeeDetail,
     pallets: int,
+    cbm: float,
+    destination: str,
     quotation_name: str,
 ) -> List[QuoteResult]:
     """
@@ -152,44 +240,71 @@ def calculate_public_price(
     details = (
         {"LA_AMAZON": rules} if "LA" in warehouse and "LA_AMAZON" not in rules else rules
     )
+    niche_warehouse = fee_detail.niche_warehouse or []
+    if destination in niche_warehouse:
+        is_niche_warehouse = True
+    else:
+        is_niche_warehouse = False
 
+    delivery_category = None
+    rate_found = False
+    rate = 0
     for category, zones in details.items():
-        if "AMAZON" in category:
-            delivery_type = "PUBLIC_AMAZON"
-        elif "WALMART" in category:
-            delivery_type = "PUBLIC_WALMART"
-        else:
-            continue
-
-        if not zones:
-            continue
-
-        try:
-            first_zone = list(zones.keys())[0]
-            rate = float(first_zone) if first_zone else 0.0
-
-            amount = rate * pallets
-            results.append(
-                QuoteResult(
-                    warehouse=warehouse,
-                    quote_type=delivery_type,
-                    rate_found=True,
-                    rate=rate,
-                    amount=amount,
-                    message=f"{delivery_type.replace('_', ' ')} 报价",
-                )
+        for zone, locations in zones.items():
+            if destination in locations:
+                if "AMAZON" in category:
+                    delivery_category = "PUBLIC_AMAZON"
+                    rate = zone
+                    rate_found = True
+                elif "WALMART" in category:
+                    delivery_category = "PUBLIC_WALMART"
+                    rate = zone
+                    rate_found = True
+        if rate_found:
+            break
+    if rate_found:
+        cacl_pallet = _calculate_total_pallet(cbm, is_niche_warehouse)
+        final_pallet = max(cacl_pallet, pallets)
+        amount = rate * final_pallet
+        results.append(
+            QuoteResult(
+                warehouse=warehouse,
+                quote_type=delivery_category,
+                rate_found=True,
+                rate=rate,
+                amount=amount,
+                message=f"{delivery_category.replace('_', ' ')} 报价",
             )
-        except Exception as e:
-            results.append(
-                QuoteResult(
-                    warehouse=warehouse,
-                    quote_type=delivery_type,
-                    rate_found=False,
-                    message=f"{delivery_type} 计算失败: {str(e)}",
-                )
+        )
+    else:
+        results.append(
+            QuoteResult(
+                warehouse=warehouse,
+                quote_type="PUBLIC",
+                rate_found=False,
+                message="未找到匹配的转运费率",
             )
+        )
 
     return results
+
+def _calculate_total_pallet(cbm: float, is_niche_warehouse: bool) -> float:
+    """板数计算公式"""
+    raw_p = float(cbm) / 2
+    integer_part = int(raw_p)
+    decimal_part = raw_p - integer_part
+
+    if decimal_part > 0:
+        if is_niche_warehouse:
+            additional = 1 if decimal_part > 0.5 else 0.5
+        else:
+            additional = 1 if decimal_part > 0.5 else 0
+        total_pallet = integer_part + additional
+    elif decimal_part == 0:
+        total_pallet = integer_part
+    else:
+        ValueError("板数计算错误")
+    return total_pallet
 
 
 @router.post("/freight_inquiry", response_model=FreightInquiryResponse, name="freight_inquiry")
@@ -207,7 +322,7 @@ async def get_freight_inquiry(
     3. 同时计算组合柜和转运方式价格
     
     Args:
-        request: 询价请求，包含 warehouse, pallets, cbm, container_cbm, container_type
+        request: 询价请求，包含 destination, pallets, cbm, container_cbm, container_type
         current_user: 当前登录用户
         db: 数据库会话
     
@@ -219,7 +334,7 @@ async def get_freight_inquiry(
         Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...
         Content-Type: application/json
         {
-            "warehouse": "NJ",
+            "destination": "ACY2",
             "pallets": 5,
             "cbm": 15.0,
             "container_cbm": 68.0,
@@ -252,7 +367,7 @@ async def get_freight_inquiry(
         }
     """
     try:
-        quotation = get_latest_quotation(db)
+        quotation = get_latest_quotation(db, current_user)
         
         if not quotation:
             return FreightInquiryResponse(
@@ -262,7 +377,7 @@ async def get_freight_inquiry(
                 message="未找到有效的报价表",
             )
 
-        warehouses = [request.warehouse] if request.warehouse else ["NJ", "SAV", "LA"]
+        warehouses = ["NJ", "SAV", "LA"]
         quotes: List[QuoteResult] = []
 
         for warehouse in warehouses:
@@ -294,6 +409,7 @@ async def get_freight_inquiry(
                     fee_detail=fees_dict[combina_key],
                     pallets=request.pallets,
                     cbm=request.cbm,
+                    destination=request.destination,
                     container_cbm=request.container_cbm,
                     container_type=request.container_type,
                     quotation_name=quotation.filename or "",
@@ -306,6 +422,8 @@ async def get_freight_inquiry(
                     warehouse=warehouse,
                     fee_detail=fees_dict[public_key],
                     pallets=request.pallets,
+                    cbm=request.cbm,
+                    destination=request.destination,
                     quotation_name=quotation.filename or "",
                 )
                 quotes.extend(public_results)

@@ -21,11 +21,11 @@ class FreightInquiryRequest(BaseModel):
     """
     运费询价请求
     """
-    warehouse: Optional[str] = Field(None, description="仓库代码 (NJ/SAV/LA)，不填则查询所有仓库")
+    destination: Optional[str] = Field(None, description="仓点 (ACY2/MCO1)")
     pallets: int = Field(..., ge=1, description="板数")
-    cbm: Optional[float] = Field(None, description="体积(CBM)，组合柜计算需要")
+    cbm: float = Field(..., description="体积(CBM)")
     container_cbm: Optional[float] = Field(None, description="整柜体积(CBM)，组合柜计算需要")
-    container_type: Optional[str] = Field(None, description="柜型 (20HQ/40HQ)，组合柜计算需要")
+    container_type: Optional[str] = Field(None, description="柜型 (40HQ/GP/45HQ/GP)，组合柜计算需要")
 
 
 class FreightInquiryResponse(BaseModel):
