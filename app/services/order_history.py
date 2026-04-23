@@ -321,10 +321,12 @@ class OrderTracking:
                 arrived_at=self._convert_tz(row[12]),
                 pod_link=row[13],
                 pod_uploaded_at=self._convert_tz(row[14]),
-                cbm=row[15],
-                weight_kg=row[16],
-                n_pallet=row[17],
-                pcs=row[18],
+                shipping_order_link=row[15],
+                appointment_id=row[16],
+                cbm=row[17],
+                weight_kg=row[18],
+                n_pallet=row[19],
+                pcs=row[20],
             )
             for row in results
         ]
