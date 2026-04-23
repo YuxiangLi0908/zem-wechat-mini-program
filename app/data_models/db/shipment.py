@@ -55,6 +55,7 @@ class Shipment(Base):
     note = Column(String(1000), nullable=True)
     pod_link = Column(String(2000), nullable=True)
     pod_uploaded_at = Column(DateTime, nullable=True)
+    shipping_order_link = Column(String(2000), nullable=True)
     pallet_dumpped = Column(Float, nullable=True, default=0)
     abnormal_palletization = Column(Boolean, nullable=True, default=False)
     po_expired = Column(Boolean, nullable=True, default=False)
