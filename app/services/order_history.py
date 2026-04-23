@@ -266,12 +266,11 @@ class OrderTracking:
                     Shipment.arrived_at_utc.label("arrived_at"),
                     Shipment.pod_link,
                     Shipment.pod_uploaded_at,
-                    Shipment.shipping_order_link,  # 添加：出库单链接（与 zem-client-app 保持一致）
-                    Shipment.appointment_id,  # 添加：ISA ID（用户需求）
-                    # 修复：sum空值处理（coalesce将None转为0）
-                    func.round(cast(func.coalesce(func.sum(Pallet.cbm), 0), Numeric), 4).label("cbm"),
+                    Shipment.shipping_order_link,
+                    Shipment.appointment_id,
+                    func.round(cast(func.sum(Pallet.cbm), Numeric), 4).label("cbm"),
                     func.round(
-                        cast(func.coalesce(func.sum(Pallet.weight_lbs), 0) / 2.20462, Numeric), 2
+                        cast(func.sum(Pallet.weight_lbs) / 2.20462, Numeric), 2
                     ).label("weight_kg"),
                     func.count(distinct(Pallet.id)).label("n_pallet"),
                     func.sum(Pallet.pcs).label("pcs"),
@@ -301,7 +300,6 @@ class OrderTracking:
                 .all()
             )
         except Exception as e:
-            print(f"Postport query error: {str(e)}")
             return OrderPostportResponse(shipment=[])
         
         data = [
