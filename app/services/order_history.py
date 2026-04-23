@@ -185,25 +185,32 @@ class OrderTracking:
                     "timestamp": self._convert_tz(retrieval["temp_t49_pod_discharge_at"]),
                 })
         
-        # 3. 提柜相关事件（修复：空值判断）
+        # 3. 提柜相关事件（与 zem-client-app 保持一致）
         retrieval = order_dict.get("retrieval", {})
         if retrieval:
-            if retrieval.get("scheduled_at"):
-                target_time = self._convert_tz(retrieval.get("target_retrieval_timestamp"))
+            if retrieval.get("target_retrieval_timestamp_lower"):
+                lower_time = retrieval.get("target_retrieval_timestamp_lower")
+                upper_time = retrieval.get("target_retrieval_timestamp")
+                if lower_time and upper_time:
+                    time_range = f"{self._format_date_only(lower_time)} 到 {self._format_date_only(upper_time)}"
+                elif upper_time:
+                    time_range = self._format_date_only(upper_time)
+                else:
+                    time_range = ""
                 preport_history.append({
                     "status": "PORT_PICKUP_SCHEDULED",
-                    "description": f"预约港口提柜: 预计提柜时间 {target_time or '未知时间'}",
+                    "description": f"预计提柜时间 {time_range}",
                     "location": pod,
-                    "timestamp": self._convert_tz(retrieval["scheduled_at"]),
+                    "timestamp": self._convert_tz(retrieval["target_retrieval_timestamp_lower"]),
                 })
             
-            if retrieval.get("arrive_at_destination"):
-                location = retrieval.get("retrieval_destination_precise") or "未知仓点"
+            if retrieval.get("actual_retrieval_timestamp"):
+                location = retrieval.get("retrieval_destination_precise")
                 preport_history.append({
                     "status": "ARRIVE_AT_WAREHOUSE",
-                    "description": f"港口提柜完成, 货柜到达目的仓点 {location}",
+                    "description": "提柜完成",
                     "location": location,
-                    "timestamp": self._convert_tz(retrieval.get("arrive_at")),
+                    "timestamp": self._convert_tz(retrieval.get("actual_retrieval_timestamp")),
                 })
         
         # 4. 卸货/拆柜事件（修复：空值判断）
@@ -259,13 +266,15 @@ class OrderTracking:
                     Shipment.arrived_at_utc.label("arrived_at"),
                     Shipment.pod_link,
                     Shipment.pod_uploaded_at,
+                    Shipment.shipping_order_link,  # 添加：出库单链接（与 zem-client-app 保持一致）
+                    Shipment.appointment_id,  # 添加：ISA ID（用户需求）
                     # 修复：sum空值处理（coalesce将None转为0）
                     func.round(cast(func.coalesce(func.sum(Pallet.cbm), 0), Numeric), 4).label("cbm"),
                     func.round(
                         cast(func.coalesce(func.sum(Pallet.weight_lbs), 0) / 2.20462, Numeric), 2
                     ).label("weight_kg"),
                     func.count(distinct(Pallet.id)).label("n_pallet"),
-                    func.count(Pallet.pcs).label("pcs"),
+                    func.sum(Pallet.pcs).label("pcs"),
                 )
                 .join(Pallet.container)
                 .outerjoin(Pallet.shipment)
@@ -286,6 +295,8 @@ class OrderTracking:
                     Shipment.arrived_at_utc,
                     Shipment.pod_link,
                     Shipment.pod_uploaded_at,
+                    Shipment.shipping_order_link,
+                    Shipment.appointment_id,
                 )
                 .all()
             )
@@ -340,3 +351,24 @@ class OrderTracking:
         except Exception as e:
             print(f"Timezone convert error: {str(e)}")
             return ts  # 转换失败时返回原时间
+
+    def _format_date_only(self, ts: datetime) -> str:
+        """
+        格式化日期（仅显示日期，不显示时间）
+        
+        Args:
+            ts: 时间戳
+        
+        Returns:
+            格式化后的日期字符串
+        """
+        if not ts:
+            return ""
+        try:
+            local_time = self._convert_tz(ts)
+            if local_time:
+                return local_time.strftime("%Y-%m-%d")
+            return ""
+        except Exception as e:
+            print(f"Date format error: {str(e)}")
+            return ""
