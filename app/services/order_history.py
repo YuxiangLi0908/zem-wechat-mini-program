@@ -430,3 +430,25 @@ class OrderTracking:
         except Exception as e:
             print(f"Timezone convert error: {str(e)}")
             return ts  # 转换失败时返回原时间
+    
+    def _format_date_only(self, ts: datetime) -> str:
+        """
+        格式化日期（仅显示日期，不显示时间）
+        
+        Args:
+            ts: 时间戳
+        
+        Returns:
+            格式化后的日期字符串
+        """
+        if not ts:
+            return ""
+        try:
+            local_time = self._convert_tz(ts)
+            if local_time:
+                return local_time.strftime("%Y-%m-%d")
+            return ""
+        except Exception as e:
+            print(f"Date format error: {str(e)}")
+            return ""
+            return ts  # 转换失败时返回原时间
