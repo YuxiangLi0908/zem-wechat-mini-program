@@ -251,6 +251,8 @@ class OrderTracking:
             tuple: (港前数据, 是否有权限, 订单所属客户名称)
         """
         try:
+            print(f"[Postport] 查询柜号: {self.container_number}")
+            
             # 1. 先查询所有 pallet 的异常信息
             pallet_exceptions = {}
             exceptions_query = (
@@ -266,17 +268,20 @@ class OrderTracking:
                 .filter(PalletException.id.isnot(None))
                 .all()
             )
+            print(f"[Postport] 异常查询结果行数: {len(exceptions_query)}")
             # 按 pallet id 保存异常信息（如果有多个异常，取第一个）
             for exc_row in exceptions_query:
                 pallet_id = exc_row[0]
+                print(f"[Postport] 异常数据 - pallet_id: {pallet_id}, type: {exc_row[1]}, reason: {exc_row[2]}")
                 if pallet_id not in pallet_exceptions:
                     pallet_exceptions[pallet_id] = {
                         'exception_type': exc_row[1],
                         'exception_reason': exc_row[2]
                     }
+            print(f"[Postport] pallet_exceptions dict: {pallet_exceptions}")
             
-            # 2. 查询所有相关的 pallet id，用于判断是否有异常
-            pallet_ids_query = (
+            # 2. 查询基础的港后数据
+            base_query = (
                 self.db_session.query(
                     Pallet.destination,
                     Pallet.PO_ID,
@@ -295,54 +300,83 @@ class OrderTracking:
                     Shipment.pod_uploaded_at,
                     Shipment.shipping_order_link,
                     Shipment.appointment_id,
-                    func.array_agg(distinct(Pallet.id)).label("pallet_ids"),
-                    func.round(cast(func.coalesce(func.sum(Pallet.cbm), 0), Numeric), 4).label("cbm"),
+                    Pallet.id.label("pallet_id"),  # 新增：单独查询 pallet_id
+                    func.round(cast(func.coalesce(Pallet.cbm, 0), Numeric), 4).label("cbm"),
                     func.round(
-                        cast(func.coalesce(func.sum(Pallet.weight_lbs), 0) / 2.20462, Numeric), 2
+                        cast(func.coalesce(Pallet.weight_lbs, 0) / 2.20462, Numeric), 2
                     ).label("weight_kg"),
-                    func.count(distinct(Pallet.id)).label("n_pallet"),
                     func.sum(Pallet.pcs).label("pcs"),
                 )
                 .join(Pallet.container)
                 .outerjoin(Pallet.shipment)
                 .filter(Container.container_number == self.container_number)
-                .group_by(
-                    Pallet.destination,
-                    Pallet.PO_ID,
-                    Pallet.delivery_method,
-                    Pallet.note,
-                    Pallet.delivery_type,
-                    Shipment.shipment_batch_number,
-                    Shipment.is_shipment_schduled,
-                    Shipment.shipment_appointment_utc,
-                    Shipment.shipment_appointment_utc,
-                    Shipment.is_shipped,
-                    Shipment.shipped_at_utc,
-                    Shipment.is_arrived,
-                    Shipment.arrived_at_utc,
-                    Shipment.pod_link,
-                    Shipment.pod_uploaded_at,
-                    Shipment.shipping_order_link,
-                    Shipment.appointment_id,
-                )
                 .all()
             )
+            print(f"[Postport] base_query 结果行数: {len(base_query)}")
+            
+            # 3. 手动分组（按原始的分组键）
+            grouped_data = {}
+            for row in base_query:
+                # 分组键：destination、PO_ID、delivery_method、note、delivery_type、shipment_batch_number、is_shipment_schduled、shipment_appointment_utc、is_shipped、shipped_at_utc、is_arrived、arrived_at_utc、pod_link、pod_uploaded_at、shipping_order_link、appointment_id
+                key = (
+                    row[0],  # destination
+                    row[1],  # PO_ID
+                    row[2],  # delivery_method
+                    row[3],  # note
+                    row[4],  # delivery_type
+                    row[5],  # shipment_batch_number
+                    row[6],  # is_shipment_schduled
+                    row[7],  # shipment_schduled_at (which is shipment_appointment_utc)
+                    row[8],  # shipment_appointment (which is also shipment_appointment_utc)
+                    row[9],  # is_shipped
+                    row[10], # shipped_at
+                    row[11], # is_arrived
+                    row[12], # arrived_at
+                    row[13], # pod_link
+                    row[14], # pod_uploaded_at
+                    row[15], # shipping_order_link
+                    row[16], # appointment_id
+                )
+                
+                pallet_id = row[17]  # 第18个元素是 pallet_id
+                if key not in grouped_data:
+                    grouped_data[key] = {
+                        'base_row': row,
+                        'pallet_ids': set(),
+                        'total_cbm': 0.0,
+                        'total_weight': 0.0,
+                        'total_pcs': 0,
+                    }
+                grouped_data[key]['pallet_ids'].add(pallet_id)
+                grouped_data[key]['total_cbm'] += float(row[18]) if row[18] else 0
+                grouped_data[key]['total_weight'] += float(row[19]) if row[19] else 0
+                grouped_data[key]['total_pcs'] += int(row[20]) if row[20] else 0
+            
+            print(f"[Postport] 分组后组数: {len(grouped_data)}")
+            
         except Exception as e:
             print(f"Postport query error: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return OrderPostportResponse(shipment=[])
         
         data = []
-        for row in pallet_ids_query:
+        for row_idx, (key, group) in enumerate(grouped_data.items()):
+            row = group['base_row']
+            pallet_ids = group['pallet_ids']
+            n_pallet = len(pallet_ids)
+            
             # 检查是否有异常
             has_exception = False
             exception_type = None
             exception_reason = None
-            pallet_ids = row[15] if row[15] else []
+            print(f"[Postport] 第 {row_idx} 组数据 - pallet_ids: {list(pallet_ids)}")
             for pid in pallet_ids:
                 if pid in pallet_exceptions:
                     has_exception = True
                     exception_type = pallet_exceptions[pid]['exception_type']
                     exception_reason = pallet_exceptions[pid]['exception_reason']
+                    print(f"[Postport]   找到异常! pid={pid}, type={exception_type}")
                     break
             
             data.append(
@@ -362,17 +396,18 @@ class OrderTracking:
                     arrived_at=self._convert_tz(row[12]),
                     pod_link=row[13],
                     pod_uploaded_at=self._convert_tz(row[14]),
-                    shipping_order_link=row[16],
-                    appointment_id=row[17],
-                    cbm=row[18],
-                    weight_kg=row[19],
-                    n_pallet=row[20],
-                    pcs=row[21],
+                    shipping_order_link=row[15],
+                    appointment_id=row[16],
+                    cbm=round(group['total_cbm'], 4),
+                    weight_kg=round(group['total_weight'], 2),
+                    n_pallet=n_pallet,
+                    pcs=group['total_pcs'],
                     has_exception=has_exception,
                     exception_type=exception_type,
                     exception_reason=exception_reason,
                 )
             )
+        
         
         return OrderPostportResponse(shipment=data)
 
