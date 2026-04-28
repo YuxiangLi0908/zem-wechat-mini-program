@@ -408,7 +408,6 @@ class OrderTracking:
                 )
             )
         
-        
         return OrderPostportResponse(shipment=data)
 
     def _convert_tz(self, ts: datetime) -> Optional[datetime]:
