@@ -25,6 +25,7 @@ from app.data_models.db.container import Container
 from app.data_models.db.order import Order
 from app.data_models.db.pallet import Pallet
 from app.data_models.db.shipment import Shipment
+from app.data_models.db.pallet_exception import PalletException
 from app.data_models.order_tracking import (
     OrderPostportResponse,
     OrderPreportResponse,
@@ -180,37 +181,30 @@ class OrderTracking:
             if retrieval and retrieval.get("temp_t49_pod_discharge_at"):
                 preport_history.append({
                     "status": "PORT_UNLOADING",
-                    "description": "码头放行",
+                    "description": "港口卸货",
                     "location": pod,
                     "timestamp": self._convert_tz(retrieval["temp_t49_pod_discharge_at"]),
                 })
         
-        # 3. 提柜相关事件（与 zem-client-app 保持一致）
+        # 3. 提柜相关事件（修复：空值判断）
         retrieval = order_dict.get("retrieval", {})
         if retrieval:
-            if retrieval.get("target_retrieval_timestamp_lower"):
-                lower_time = retrieval.get("target_retrieval_timestamp_lower")
-                upper_time = retrieval.get("target_retrieval_timestamp")
-                if lower_time and upper_time:
-                    time_range = f"{self._format_date_only(lower_time)} 到 {self._format_date_only(upper_time)}"
-                elif upper_time:
-                    time_range = self._format_date_only(upper_time)
-                else:
-                    time_range = ""
+            if retrieval.get("scheduled_at"):
+                target_time = self._convert_tz(retrieval.get("target_retrieval_timestamp"))
                 preport_history.append({
                     "status": "PORT_PICKUP_SCHEDULED",
-                    "description": f"预计提柜时间 {time_range}",
+                    "description": f"预约港口提柜: 预计提柜时间 {target_time or '未知时间'}",
                     "location": pod,
-                    "timestamp": self._convert_tz(retrieval["target_retrieval_timestamp_lower"]),
+                    "timestamp": self._convert_tz(retrieval["scheduled_at"]),
                 })
             
-            if retrieval.get("actual_retrieval_timestamp"):
-                location = retrieval.get("retrieval_destination_precise")
+            if retrieval.get("arrive_at_destination"):
+                location = retrieval.get("retrieval_destination_precise") or "未知仓点"
                 preport_history.append({
                     "status": "ARRIVE_AT_WAREHOUSE",
-                    "description": "提柜完成",
+                    "description": f"港口提柜完成, 货柜到达目的仓点 {location}",
                     "location": location,
-                    "timestamp": self._convert_tz(retrieval.get("actual_retrieval_timestamp")),
+                    "timestamp": self._convert_tz(retrieval.get("arrive_at")),
                 })
         
         # 4. 卸货/拆柜事件（修复：空值判断）
@@ -249,7 +243,32 @@ class OrderTracking:
             tuple: (港前数据, 是否有权限, 订单所属客户名称)
         """
         try:
-            results = (
+            # 1. 先查询所有 pallet 的异常信息
+            pallet_exceptions = {}
+            exceptions_query = (
+                self.db_session.query(
+                    Pallet.id,
+                    PalletException.exception_type,
+                    PalletException.exception_reason
+                )
+                .select_from(Pallet)
+                .join(Pallet.container)
+                .outerjoin(PalletException, PalletException.pallet_id == Pallet.id)
+                .filter(Container.container_number == self.container_number)
+                .filter(PalletException.id.isnot(None))
+                .all()
+            )
+            # 按 pallet id 保存异常信息（如果有多个异常，取第一个）
+            for exc_row in exceptions_query:
+                pallet_id = exc_row[0]
+                if pallet_id not in pallet_exceptions:
+                    pallet_exceptions[pallet_id] = {
+                        'exception_type': exc_row[1],
+                        'exception_reason': exc_row[2]
+                    }
+            
+            # 2. 查询所有相关的 pallet id，用于判断是否有异常
+            pallet_ids_query = (
                 self.db_session.query(
                     Pallet.destination,
                     Pallet.PO_ID,
@@ -268,9 +287,10 @@ class OrderTracking:
                     Shipment.pod_uploaded_at,
                     Shipment.shipping_order_link,
                     Shipment.appointment_id,
-                    func.round(cast(func.sum(Pallet.cbm), Numeric), 4).label("cbm"),
+                    func.array_agg(distinct(Pallet.id)).label("pallet_ids"),
+                    func.round(cast(func.coalesce(func.sum(Pallet.cbm), 0), Numeric), 4).label("cbm"),
                     func.round(
-                        cast(func.sum(Pallet.weight_lbs) / 2.20462, Numeric), 2
+                        cast(func.coalesce(func.sum(Pallet.weight_lbs), 0) / 2.20462, Numeric), 2
                     ).label("weight_kg"),
                     func.count(distinct(Pallet.id)).label("n_pallet"),
                     func.sum(Pallet.pcs).label("pcs"),
@@ -300,33 +320,51 @@ class OrderTracking:
                 .all()
             )
         except Exception as e:
+            print(f"Postport query error: {str(e)}")
             return OrderPostportResponse(shipment=[])
         
-        data = [
-            PalletShipmentSummary(
-                destination=row[0],
-                PO_ID=row[1],
-                delivery_method=row[2],
-                note=row[3],
-                delivery_type=row[4],
-                master_shipment_batch_number=row[5],
-                is_shipment_schduled=row[6],
-                shipment_schduled_at=self._convert_tz(row[7]),
-                shipment_appointment=self._convert_tz(row[8]),
-                is_shipped=row[9],
-                shipped_at=self._convert_tz(row[10]),
-                is_arrived=row[11],
-                arrived_at=self._convert_tz(row[12]),
-                pod_link=row[13],
-                pod_uploaded_at=self._convert_tz(row[14]),
-                shipping_order_link=row[15],
-                appointment_id=row[16],
-                cbm=row[17],
-                weight_kg=row[18],
-                n_pallet=row[19],
-                pcs=row[20],
+        data = []
+        for row in pallet_ids_query:
+            # 检查是否有异常
+            has_exception = False
+            exception_type = None
+            exception_reason = None
+            pallet_ids = row[15] if row[15] else []
+            for pid in pallet_ids:
+                if pid in pallet_exceptions:
+                    has_exception = True
+                    exception_type = pallet_exceptions[pid]['exception_type']
+                    exception_reason = pallet_exceptions[pid]['exception_reason']
+                    break
+            
+            data.append(
+                PalletShipmentSummary(
+                    destination=row[0],
+                    PO_ID=row[1],
+                    delivery_method=row[2],
+                    note=row[3],
+                    delivery_type=row[4],
+                    master_shipment_batch_number=row[5],
+                    is_shipment_schduled=row[6],
+                    shipment_schduled_at=self._convert_tz(row[7]),
+                    shipment_appointment=self._convert_tz(row[8]),
+                    is_shipped=row[9],
+                    shipped_at=self._convert_tz(row[10]),
+                    is_arrived=row[11],
+                    arrived_at=self._convert_tz(row[12]),
+                    pod_link=row[13],
+                    pod_uploaded_at=self._convert_tz(row[14]),
+                    shipping_order_link=row[16],
+                    appointment_id=row[17],
+                    cbm=row[18],
+                    weight_kg=row[19],
+                    n_pallet=row[20],
+                    pcs=row[21],
+                    has_exception=has_exception,
+                    exception_type=exception_type,
+                    exception_reason=exception_reason,
+                )
             )
-            for row in results
         ]
         
         return OrderPostportResponse(shipment=data)
@@ -351,24 +389,3 @@ class OrderTracking:
         except Exception as e:
             print(f"Timezone convert error: {str(e)}")
             return ts  # 转换失败时返回原时间
-
-    def _format_date_only(self, ts: datetime) -> str:
-        """
-        格式化日期（仅显示日期，不显示时间）
-        
-        Args:
-            ts: 时间戳
-        
-        Returns:
-            格式化后的日期字符串
-        """
-        if not ts:
-            return ""
-        try:
-            local_time = self._convert_tz(ts)
-            if local_time:
-                return local_time.strftime("%Y-%m-%d")
-            return ""
-        except Exception as e:
-            print(f"Date format error: {str(e)}")
-            return ""

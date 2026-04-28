@@ -187,12 +187,16 @@ class PalletShipmentSummary(BaseModel):
     arrived_at: Optional[datetime] = None
     pod_link: Optional[str] = None
     pod_uploaded_at: Optional[datetime] = None
-    shipping_order_link: Optional[str] = None  # 添加：出库单链接（与 zem-client-app 保持一致）
-    appointment_id: Optional[str] = None  # 添加：ISA ID（用户需求）
+    shipping_order_link: Optional[str] = None
+    appointment_id: Optional[str] = None
     cbm: Optional[float] = None
     weight_kg: Optional[float] = None
     n_pallet: Optional[int] = None
     pcs: Optional[int] = None
+    # 异常信息
+    has_exception: Optional[bool] = False
+    exception_type: Optional[str] = None
+    exception_reason: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
