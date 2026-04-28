@@ -189,22 +189,30 @@ class OrderTracking:
         # 3. 提柜相关事件（修复：空值判断）
         retrieval = order_dict.get("retrieval", {})
         if retrieval:
-            if retrieval.get("scheduled_at"):
+            if retrieval.get("target_retrieval_timestamp_lower"):
+                lower_time = retrieval.get("target_retrieval_timestamp_lower")
+                upper_time = retrieval.get("target_retrieval_timestamp")
+                if lower_time and upper_time:
+                    time_range = f"{self._format_date_only(lower_time)} 到 {self._format_date_only(upper_time)}"
+                elif upper_time:
+                    time_range = self._format_date_only(upper_time)
+                else:
+                    time_range = ""
                 target_time = self._convert_tz(retrieval.get("target_retrieval_timestamp"))
                 preport_history.append({
                     "status": "PORT_PICKUP_SCHEDULED",
-                    "description": f"预约港口提柜: 预计提柜时间 {target_time or '未知时间'}",
+                    "description": f"预计提柜时间 {time_range}",
                     "location": pod,
-                    "timestamp": self._convert_tz(retrieval["scheduled_at"]),
+                    "timestamp": self._convert_tz(retrieval["target_retrieval_timestamp_lower"]),
                 })
             
-            if retrieval.get("arrive_at_destination"):
-                location = retrieval.get("retrieval_destination_precise") or "未知仓点"
+            if retrieval.get("actual_retrieval_timestamp"):
+                location = retrieval.get("retrieval_destination_precise")
                 preport_history.append({
                     "status": "ARRIVE_AT_WAREHOUSE",
-                    "description": f"港口提柜完成, 货柜到达目的仓点 {location}",
+                    "description": "提柜完成",
                     "location": location,
-                    "timestamp": self._convert_tz(retrieval.get("arrive_at")),
+                    "timestamp": self._convert_tz(retrieval.get("actual_retrieval_timestamp")),
                 })
         
         # 4. 卸货/拆柜事件（修复：空值判断）
@@ -365,7 +373,6 @@ class OrderTracking:
                     exception_reason=exception_reason,
                 )
             )
-        ]
         
         return OrderPostportResponse(shipment=data)
 
