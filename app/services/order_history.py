@@ -161,7 +161,7 @@ class OrderTracking:
             preport_history.append({
                 "status": "ORDER_CREATED",
                 "description": f"创建订单: {order_dict.get('container', {}).get('container_number', '未知柜号')}",
-                "timestamp": self._convert_tz(order_dict["created_at"]),
+                "timestamp": self._format_date_only(order_dict["created_at"]),
             })
         
         # 2. 港口相关事件（修复：多层级空值判断）
@@ -175,7 +175,7 @@ class OrderTracking:
                     "status": "ARRIVED_AT_PORT",
                     "description": f"到达港口: {pod or '未知港口'}",
                     "location": pod,
-                    "timestamp": self._convert_tz(retrieval["temp_t49_pod_arrive_at"]),
+                    "timestamp": self._format_date_only(retrieval["temp_t49_pod_arrive_at"]),
                 })
             
             if retrieval and retrieval.get("temp_t49_pod_discharge_at"):
@@ -183,7 +183,7 @@ class OrderTracking:
                     "status": "PORT_UNLOADING",
                     "description": "港口卸货",
                     "location": pod,
-                    "timestamp": self._convert_tz(retrieval["temp_t49_pod_discharge_at"]),
+                    "timestamp": self._format_date_only(retrieval["temp_t49_pod_discharge_at"]),
                 })
         
         # 3. 提柜相关事件（修复：空值判断）
@@ -203,7 +203,7 @@ class OrderTracking:
                     "status": "PORT_PICKUP_SCHEDULED",
                     "description": f"预计提柜时间 {time_range}",
                     "location": pod,
-                    "timestamp": self._convert_tz(retrieval["target_retrieval_timestamp_lower"]),
+                    "timestamp": self._format_date_only(retrieval["target_retrieval_timestamp_lower"]),
                 })
             
             if retrieval.get("actual_retrieval_timestamp"):
@@ -212,7 +212,7 @@ class OrderTracking:
                     "status": "ARRIVE_AT_WAREHOUSE",
                     "description": "提柜完成",
                     "location": location,
-                    "timestamp": self._convert_tz(retrieval.get("actual_retrieval_timestamp")),
+                    "timestamp": self._format_date_only(retrieval.get("actual_retrieval_timestamp")),
                 })
         
         # 4. 卸货/拆柜事件（修复：空值判断）
@@ -225,14 +225,14 @@ class OrderTracking:
                     "status": "OFFLOAD",
                     "description": "拆柜完成",
                     "location": location,
-                    "timestamp": self._convert_tz(offload["offload_at"]),
+                    "timestamp": self._format_date_only(offload["offload_at"]),
                 })
             
             if retrieval and retrieval.get("empty_returned"):
                 preport_history.append({
                     "status": "EMPTY_RETURN",
                     "description": "已归还空箱",
-                    "timestamp": self._convert_tz(retrieval.get("empty_returned_at")),
+                    "timestamp": self._format_date_only(retrieval.get("empty_returned_at")),
                 })
         
         order_dict["history"] = preport_history
@@ -388,14 +388,14 @@ class OrderTracking:
                     delivery_type=row[4],
                     master_shipment_batch_number=row[5],
                     is_shipment_schduled=row[6],
-                    shipment_schduled_at=self._convert_tz(row[7]),
-                    shipment_appointment=self._convert_tz(row[8]),
+                    shipment_schduled_at=self._format_date_only(row[7]),
+                    shipment_appointment=self._format_date_only(row[8]),
                     is_shipped=row[9],
-                    shipped_at=self._convert_tz(row[10]),
+                    shipped_at=self._format_date_only(row[10]),
                     is_arrived=row[11],
-                    arrived_at=self._convert_tz(row[12]),
+                    arrived_at=self._format_date_only(row[12]),
                     pod_link=row[13],
-                    pod_uploaded_at=self._convert_tz(row[14]),
+                    pod_uploaded_at=self._format_date_only(row[14]),
                     shipping_order_link=row[15],
                     appointment_id=row[16],
                     cbm=round(group['total_cbm'], 4),
@@ -444,11 +444,7 @@ class OrderTracking:
         if not ts:
             return ""
         try:
-            local_time = self._convert_tz(ts)
-            if local_time:
-                return local_time.strftime("%Y-%m-%d")
-            return ""
+            return ts.strftime("%Y-%m-%d")
         except Exception as e:
             print(f"Date format error: {str(e)}")
             return ""
-            return ts  # 转换失败时返回原时间
