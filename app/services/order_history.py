@@ -305,7 +305,7 @@ class OrderTracking:
                     func.round(
                         cast(func.coalesce(Pallet.weight_lbs, 0) / 2.20462, Numeric), 2
                     ).label("weight_kg"),
-                    func.sum(Pallet.pcs).label("pcs"),
+                    Pallet.pcs.label("pcs"),
                 )
                 .join(Pallet.container)
                 .outerjoin(Pallet.shipment)
@@ -430,7 +430,7 @@ class OrderTracking:
         except Exception as e:
             print(f"Timezone convert error: {str(e)}")
             return ts  # 转换失败时返回原时间
-    
+        
     def _format_date_only(self, ts: datetime) -> str:
         """
         格式化日期（仅显示日期，不显示时间）
