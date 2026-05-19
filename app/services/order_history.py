@@ -376,12 +376,12 @@ class OrderTracking:
                     print(f"[Postport] LA仓库，都有值，查询Pallet表")
                 elif offload_at is not None and offload_other_at is None:
                     # offload_at 有值、offload_other_at 无值
-                    # Pallet 只看 delivery_type=publicd，PackingList 只看 delivery_type=私仓
+                    # Pallet 只看 delivery_type=public，PackingList 只看 delivery_type=私仓
                     query_pallet = True
                     query_packing_list = True
-                    pallet_delivery_type_filter = "publicd"
+                    pallet_delivery_type_filter = "public"
                     packing_list_delivery_type_filter = "私仓"
-                    print(f"[Postport] LA仓库，offload_at有值，查询Pallet(delivery_type=publicd)和PackingList(delivery_type=私仓)")
+                    print(f"[Postport] LA仓库，offload_at有值，查询Pallet(delivery_type=public)和PackingList(delivery_type=私仓)")
                 elif offload_at is None and offload_other_at is not None:
                     # offload_at 无值、offload_other_at 有值
                     # Pallet 只看 delivery_type=other，PackingList 只看 delivery_type=public
