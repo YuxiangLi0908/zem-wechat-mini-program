@@ -40,9 +40,15 @@ class OrderTracking:
     订单追踪服务类
     
     【功能说明】
-    1. 根据柜号查询完整的物流追踪信息
+    1. 根据柜号或唛头查询完整的物流追踪信息
     2. 根据用户类型进行权限验证
     3. 构建港前和港后的时间轴数据
+    
+    【查询逻辑】
+    1. 先按柜号查询
+    2. 若没查到，按唛头查询 pallet 表的 shipping_mark
+    3. 若还没查到，再查 pallet 表的其他可能字段
+    4. 找到对应柜号后，按原流程查询
     
     【权限验证逻辑】
     - 员工用户（is_staff=True）：直接返回完整信息
@@ -52,7 +58,7 @@ class OrderTracking:
     def __init__(
         self,
         user: CurrentUser,
-        container_number: str,
+        query: str,
         db_session: Session,
     ) -> None:
         """
@@ -60,13 +66,53 @@ class OrderTracking:
         
         Args:
             user: 当前登录用户
-            container_number: 要查询的柜号
+            query: 要查询的内容（柜号或唛头）
             db_session: 数据库会话
         """
         self.user = user
-        self.container_number = container_number
+        self.original_query = query
+        self.container_number = self._resolve_container_number(query, db_session)
         self.db_session = db_session
         self.tz = pytz.timezone("Asia/Shanghai")
+    
+    def _resolve_container_number(self, query: str, db_session: Session) -> str:
+        """
+        根据查询内容解析出柜号
+        
+        Args:
+            query: 用户输入的查询内容
+            db_session: 数据库会话
+            
+        Returns:
+            str: 柜号
+        """
+        # 第一步：先按柜号查询 Container 表
+        container = db_session.query(Container).filter(
+            Container.container_number == query
+        ).first()
+        if container:
+            return container.container_number
+        
+        # 第二步：按唛头查询 Pallet 表的 shipping_mark
+        pallet = db_session.query(Pallet).options(
+            joinedload(Pallet.container)
+        ).filter(
+            Pallet.shipping_mark == query
+        ).first()
+        if pallet and pallet.container:
+            return pallet.container.container_number
+        
+        # 第三步：如果还没查到，尝试模糊查询 shipping_mark
+        pallet = db_session.query(Pallet).options(
+            joinedload(Pallet.container)
+        ).filter(
+            Pallet.shipping_mark.like(f"%{query}%")
+        ).first()
+        if pallet and pallet.container:
+            return pallet.container.container_number
+        
+        # 如果都没找到，返回原查询内容
+        return query
 
     def build_order_full_history(self) -> OrderResponse:
         """

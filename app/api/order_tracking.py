@@ -86,13 +86,13 @@ async def get_order_full_history(
             "message": "您没有权限查看柜号 ABCD1234567 的详情，该柜子归属于其他客户"
         }
     """
-    # 清理柜号（去除前后空格）
-    container_number = request.container_number.strip()
+    # 清理查询内容（去除前后空格）
+    query = request.container_number.strip()
     
     # 创建订单追踪服务实例
     order_tracking = OrderTracking(
         user=current_user,
-        container_number=container_number,
+        query=query,
         db_session=db,
     )
     
