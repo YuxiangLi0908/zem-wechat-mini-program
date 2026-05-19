@@ -86,15 +86,26 @@ async def get_order_full_history(
             "message": "您没有权限查看柜号 ABCD1234567 的详情，该柜子归属于其他客户"
         }
     """
-    # 清理查询内容（去除前后空格）
-    query = request.container_number.strip()
-    
-    # 创建订单追踪服务实例
-    order_tracking = OrderTracking(
-        user=current_user,
-        query=query,
-        db_session=db,
-    )
-    
-    # 构建并返回完整的订单追踪历史
-    return order_tracking.build_order_full_history()
+    import traceback
+    try:
+        # 清理查询内容（去除前后空格）
+        query = request.container_number.strip()
+        
+        # 创建订单追踪服务实例
+        order_tracking = OrderTracking(
+            user=current_user,
+            query=query,
+            db_session=db,
+        )
+        
+        # 构建并返回完整的订单追踪历史
+        return order_tracking.build_order_full_history()
+    except Exception as e:
+        error_details = f"异常类型: {type(e).__name__}\n异常信息: {str(e)}\n堆栈:\n{traceback.format_exc()}"
+        print(f"[Error] 查询失败: {error_details}")
+        return OrderResponse(
+            preport_timenode=None,
+            postport_timenode=None,
+            has_permission=False,
+            message=f"查询失败！错误详情:\n{error_details}"
+        )
