@@ -18,4 +18,5 @@ class Offload(Base):
     offload_id = Column(String(255), nullable=True)
     offload_required = Column(Boolean, nullable=True)
     offload_at = Column(DateTime, nullable=True)
+    offload_other_at = Column(DateTime, nullable=True)
     total_pallet = Column(Integer, nullable=True)
