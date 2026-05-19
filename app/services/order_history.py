@@ -71,11 +71,11 @@ class OrderTracking:
         """
         self.user = user
         self.original_query = query
-        self.container_number = self._resolve_container_number(query, db_session)
+        self.container_number, self.matched_shipping_mark, self.is_mark_query = self._resolve_container_number(query, db_session)
         self.db_session = db_session
         self.tz = pytz.timezone("Asia/Shanghai")
     
-    def _resolve_container_number(self, query: str, db_session: Session) -> str:
+    def _resolve_container_number(self, query: str, db_session: Session) -> tuple:
         """
         根据查询内容解析出柜号
         
@@ -84,14 +84,14 @@ class OrderTracking:
             db_session: 数据库会话
             
         Returns:
-            str: 柜号
+            tuple: (柜号, 匹配的shipping_mark, 是否是通过唛头查询到的)
         """
         # 第一步：先按柜号查询 Container 表
         container = db_session.query(Container).filter(
             Container.container_number == query
         ).first()
         if container:
-            return container.container_number
+            return container.container_number, None, False
         
         # 第二步：按唛头查询 Pallet 表的 shipping_mark
         pallet = db_session.query(Pallet).options(
@@ -100,7 +100,7 @@ class OrderTracking:
             Pallet.shipping_mark == query
         ).first()
         if pallet and pallet.container:
-            return pallet.container.container_number
+            return pallet.container.container_number, pallet.shipping_mark, True
         
         # 第三步：如果还没查到，尝试模糊查询 shipping_mark
         pallet = db_session.query(Pallet).options(
@@ -109,10 +109,10 @@ class OrderTracking:
             Pallet.shipping_mark.like(f"%{query}%")
         ).first()
         if pallet and pallet.container:
-            return pallet.container.container_number
+            return pallet.container.container_number, pallet.shipping_mark, True
         
         # 如果都没找到，返回原查询内容
-        return query
+        return query, None, False
 
     def build_order_full_history(self) -> OrderResponse:
         """
@@ -297,7 +297,7 @@ class OrderTracking:
             tuple: (港前数据, 是否有权限, 订单所属客户名称)
         """
         try:
-            print(f"[Postport] 查询柜号: {self.container_number}")
+            print(f"[Postport] 查询柜号: {self.container_number}, 是否唛头查询: {self.is_mark_query}, 匹配的唛头: {self.matched_shipping_mark}")
             
             # 1. 先查询所有 pallet 的异常信息
             pallet_exceptions = {}
@@ -312,8 +312,11 @@ class OrderTracking:
                 .outerjoin(PalletException, PalletException.pallet_id == Pallet.id)
                 .filter(Container.container_number == self.container_number)
                 .filter(PalletException.id.isnot(None))
-                .all()
             )
+            # 如果是通过唛头查询的，加上 shipping_mark 过滤
+            if self.is_mark_query and self.matched_shipping_mark:
+                exceptions_query = exceptions_query.filter(Pallet.shipping_mark == self.matched_shipping_mark)
+            exceptions_query = exceptions_query.all()
             print(f"[Postport] 异常查询结果行数: {len(exceptions_query)}")
             # 按 pallet id 保存异常信息（如果有多个异常，取第一个）
             for exc_row in exceptions_query:
@@ -356,8 +359,11 @@ class OrderTracking:
                 .join(Pallet.container)
                 .outerjoin(Pallet.shipment)
                 .filter(Container.container_number == self.container_number)
-                .all()
             )
+            # 如果是通过唛头查询的，加上 shipping_mark 过滤
+            if self.is_mark_query and self.matched_shipping_mark:
+                base_query = base_query.filter(Pallet.shipping_mark == self.matched_shipping_mark)
+            base_query = base_query.all()
             print(f"[Postport] base_query 结果行数: {len(base_query)}")
             
             # 3. 手动分组（按原始的分组键）
