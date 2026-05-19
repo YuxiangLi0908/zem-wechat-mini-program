@@ -24,8 +24,11 @@ from sqlalchemy.orm import Session, joinedload
 from app.data_models.db.container import Container
 from app.data_models.db.order import Order
 from app.data_models.db.pallet import Pallet
-from app.data_models.db.shipment import Shipment
 from app.data_models.db.pallet_exception import PalletException
+from app.data_models.db.packing_list import PackingList
+from app.data_models.db.shipment import Shipment
+from app.data_models.db.offload import Offload
+from app.data_models.db.retrieval import Retrieval
 from app.data_models.order_tracking import (
     OrderPostportResponse,
     OrderPreportResponse,
@@ -93,7 +96,25 @@ class OrderTracking:
         if container:
             return container.container_number, None, False
         
-        # 第二步：按唛头查询 Pallet 表的 shipping_mark
+        # 第二步：按唛头查询 PackingList 表的 shipping_mark
+        packing_list = db_session.query(PackingList).options(
+            joinedload(PackingList.container)
+        ).filter(
+            PackingList.shipping_mark == query
+        ).first()
+        if packing_list and packing_list.container:
+            return packing_list.container.container_number, packing_list.shipping_mark, True
+        
+        # 第三步：按唛头模糊查询 PackingList 表的 shipping_mark
+        packing_list = db_session.query(PackingList).options(
+            joinedload(PackingList.container)
+        ).filter(
+            PackingList.shipping_mark.like(f"%{query}%")
+        ).first()
+        if packing_list and packing_list.container:
+            return packing_list.container.container_number, packing_list.shipping_mark, True
+        
+        # 第四步：按唛头查询 Pallet 表的 shipping_mark
         pallet = db_session.query(Pallet).options(
             joinedload(Pallet.container)
         ).filter(
@@ -102,7 +123,7 @@ class OrderTracking:
         if pallet and pallet.container:
             return pallet.container.container_number, pallet.shipping_mark, True
         
-        # 第三步：如果还没查到，尝试模糊查询 shipping_mark
+        # 第五步：如果还没查到，尝试模糊查询 shipping_mark
         pallet = db_session.query(Pallet).options(
             joinedload(Pallet.container)
         ).filter(
@@ -286,89 +307,237 @@ class OrderTracking:
 
     def _build_postport_history(self) -> OrderPostportResponse:
         """
-        构建港前轨迹数据，同时进行权限验证
+        构建港后轨迹数据（陆运派送）
         
-        【权限验证逻辑】
-        1. 查询柜号对应的订单
-        2. 如果是客户用户，检查订单的 customer_name_id 是否匹配
-        3. 员工用户直接通过验证
+        【查询逻辑】
+        1. 先查询仓库信息和 offload 信息
+        2. 根据仓库是否包含 LA 以及 offload 字段的值，决定是查 Pallet 还是 PackingList
+        3. 如果是通过唛头查询的，还需要按 shipping_mark 过滤
         
         Returns:
-            tuple: (港前数据, 是否有权限, 订单所属客户名称)
+            OrderPostportResponse: 港后轨迹数据
         """
         try:
             print(f"[Postport] 查询柜号: {self.container_number}, 是否唛头查询: {self.is_mark_query}, 匹配的唛头: {self.matched_shipping_mark}")
             
-            # 1. 先查询所有 pallet 的异常信息
+            # 1. 先查询仓库信息和 offload 信息
+            order_data = (
+                self.db_session.query(Order)
+                .join(Order.container)
+                .options(
+                    joinedload(Order.retrieval),
+                    joinedload(Order.offload),
+                )
+                .filter(Container.container_number == self.container_number)
+                .first()
+            )
+            
+            retrieval_destination_area = None
+            offload_at = None
+            offload_other_at = None
+            
+            if order_data and order_data.retrieval:
+                retrieval_destination_area = order_data.retrieval.retrieval_destination_area
+            if order_data and order_data.offload:
+                offload_at = order_data.offload.offload_at
+                offload_other_at = order_data.offload.offload_other_at
+            
+            print(f"[Postport] 仓库区域: {retrieval_destination_area}")
+            print(f"[Postport] offload_at: {offload_at}, offload_other_at: {offload_other_at}")
+            
+            # 2. 判断是否是 LA 仓库
+            is_la_warehouse = False
+            if retrieval_destination_area:
+                is_la_warehouse = "LA" in retrieval_destination_area
+            
+            print(f"[Postport] 是否LA仓库: {is_la_warehouse}")
+            
+            # 3. 根据判断逻辑决定查询哪些表
+            query_pallet = None
+            query_packing_list = None
+            pallet_delivery_type_filter = None
+            packing_list_delivery_type_filter = None
+            
+            if not is_la_warehouse:
+                # 非 LA 仓库
+                if offload_at is not None:
+                    # offload_at 有值，查 Pallet 表
+                    query_pallet = True
+                    print(f"[Postport] 非LA仓库，offload_at有值，查询Pallet表")
+                else:
+                    # offload_at 无值，查 PackingList 表
+                    query_packing_list = True
+                    print(f"[Postport] 非LA仓库，offload_at无值，查询PackingList表")
+            else:
+                # LA 仓库
+                if offload_at is not None and offload_other_at is not None:
+                    # 都有值，查 Pallet 表
+                    query_pallet = True
+                    print(f"[Postport] LA仓库，都有值，查询Pallet表")
+                elif offload_at is not None and offload_other_at is None:
+                    # offload_at 有值、offload_other_at 无值
+                    # Pallet 只看 delivery_type=publicd，PackingList 只看 delivery_type=私仓
+                    query_pallet = True
+                    query_packing_list = True
+                    pallet_delivery_type_filter = "publicd"
+                    packing_list_delivery_type_filter = "私仓"
+                    print(f"[Postport] LA仓库，offload_at有值，查询Pallet(delivery_type=publicd)和PackingList(delivery_type=私仓)")
+                elif offload_at is None and offload_other_at is not None:
+                    # offload_at 无值、offload_other_at 有值
+                    # Pallet 只看 delivery_type=other，PackingList 只看 delivery_type=public
+                    query_pallet = True
+                    query_packing_list = True
+                    pallet_delivery_type_filter = "other"
+                    packing_list_delivery_type_filter = "public"
+                    print(f"[Postport] LA仓库，offload_other_at有值，查询Pallet(delivery_type=other)和PackingList(delivery_type=public)")
+                else:
+                    # 都没值，查 PackingList 表
+                    query_packing_list = True
+                    print(f"[Postport] LA仓库，都没值，查询PackingList表")
+            
+            # 4. 查询所有符合条件的记录（Pallet 和/或 PackingList）
+            all_records = []
             pallet_exceptions = {}
-            exceptions_query = (
-                self.db_session.query(
-                    Pallet.id,
-                    PalletException.exception_type,
-                    PalletException.exception_reason
-                )
-                .select_from(Pallet)
-                .join(Pallet.container)
-                .outerjoin(PalletException, PalletException.pallet_id == Pallet.id)
-                .filter(Container.container_number == self.container_number)
-                .filter(PalletException.id.isnot(None))
-            )
-            # 如果是通过唛头查询的，加上 shipping_mark 过滤
-            if self.is_mark_query and self.matched_shipping_mark:
-                exceptions_query = exceptions_query.filter(Pallet.shipping_mark == self.matched_shipping_mark)
-            exceptions_query = exceptions_query.all()
-            print(f"[Postport] 异常查询结果行数: {len(exceptions_query)}")
-            # 按 pallet id 保存异常信息（如果有多个异常，取第一个）
-            for exc_row in exceptions_query:
-                pallet_id = exc_row[0]
-                print(f"[Postport] 异常数据 - pallet_id: {pallet_id}, type: {exc_row[1]}, reason: {exc_row[2]}")
-                if pallet_id not in pallet_exceptions:
-                    pallet_exceptions[pallet_id] = {
-                        'exception_type': exc_row[1],
-                        'exception_reason': exc_row[2]
-                    }
-            print(f"[Postport] pallet_exceptions dict: {pallet_exceptions}")
             
-            # 2. 查询基础的港后数据
-            base_query = (
-                self.db_session.query(
-                    Pallet.destination,
-                    Pallet.PO_ID,
-                    Pallet.delivery_method,
-                    Pallet.note,
-                    Pallet.delivery_type,
-                    Shipment.shipment_batch_number,
-                    Shipment.is_shipment_schduled,
-                    Shipment.shipment_appointment_utc.label("shipment_schduled_at"),
-                    Shipment.shipment_appointment_utc.label("shipment_appointment"),
-                    Shipment.is_shipped,
-                    Shipment.shipped_at.label("shipped_at"),
-                    Shipment.is_arrived,
-                    Shipment.arrived_at.label("arrived_at"),
-                    Shipment.pod_link,
-                    Shipment.pod_uploaded_at,
-                    Shipment.shipping_order_link,
-                    Shipment.appointment_id,
-                    Pallet.id.label("pallet_id"),  # 新增：单独查询 pallet_id
-                    func.round(cast(func.coalesce(Pallet.cbm, 0), Numeric), 4).label("cbm"),
-                    func.round(
-                        cast(func.coalesce(Pallet.weight_lbs, 0) / 2.20462, Numeric), 2
-                    ).label("weight_kg"),
-                    Pallet.pcs.label("pcs"),
+            # 查询 Pallet 表（如果需要）
+            if query_pallet:
+                print(f"[Postport] 查询Pallet表")
+                
+                # 4.1 查询 Pallet 异常信息
+                pallet_exceptions = {}
+                exceptions_query = (
+                    self.db_session.query(
+                        Pallet.id,
+                        PalletException.exception_type,
+                        PalletException.exception_reason
+                    )
+                    .select_from(Pallet)
+                    .join(Pallet.container)
+                    .outerjoin(PalletException, PalletException.pallet_id == Pallet.id)
+                    .filter(Container.container_number == self.container_number)
+                    .filter(PalletException.id.isnot(None))
                 )
-                .join(Pallet.container)
-                .outerjoin(Pallet.shipment)
-                .filter(Container.container_number == self.container_number)
-            )
-            # 如果是通过唛头查询的，加上 shipping_mark 过滤
-            if self.is_mark_query and self.matched_shipping_mark:
-                base_query = base_query.filter(Pallet.shipping_mark == self.matched_shipping_mark)
-            base_query = base_query.all()
-            print(f"[Postport] base_query 结果行数: {len(base_query)}")
+                
+                # delivery_type 过滤
+                if pallet_delivery_type_filter:
+                    exceptions_query = exceptions_query.filter(Pallet.delivery_type == pallet_delivery_type_filter)
+                # 唛头过滤
+                if self.is_mark_query and self.matched_shipping_mark:
+                    exceptions_query = exceptions_query.filter(Pallet.shipping_mark == self.matched_shipping_mark)
+                
+                exceptions_query = exceptions_query.all()
+                print(f"[Postport] Pallet异常查询结果行数: {len(exceptions_query)}")
+                
+                for exc_row in exceptions_query:
+                    pallet_id = exc_row[0]
+                    print(f"[Postport] Pallet异常数据 - pallet_id: {pallet_id}, type: {exc_row[1]}, reason: {exc_row[2]}")
+                    if pallet_id not in pallet_exceptions:
+                        pallet_exceptions[pallet_id] = {
+                            'exception_type': exc_row[1],
+                            'exception_reason': exc_row[2]
+                        }
+                
+                # 4.2 查询 Pallet 基础数据
+                pallet_query = (
+                    self.db_session.query(
+                        Pallet.destination,
+                        Pallet.PO_ID,
+                        Pallet.delivery_method,
+                        Pallet.note,
+                        Pallet.delivery_type,
+                        Shipment.shipment_batch_number,
+                        Shipment.is_shipment_schduled,
+                        Shipment.shipment_appointment_utc.label("shipment_schduled_at"),
+                        Shipment.shipment_appointment_utc.label("shipment_appointment"),
+                        Shipment.is_shipped,
+                        Shipment.shipped_at.label("shipped_at"),
+                        Shipment.is_arrived,
+                        Shipment.arrived_at.label("arrived_at"),
+                        Shipment.pod_link,
+                        Shipment.pod_uploaded_at,
+                        Shipment.shipping_order_link,
+                        Shipment.appointment_id,
+                        Pallet.id.label("id"),
+                        func.round(cast(func.coalesce(Pallet.cbm, 0), Numeric), 4).label("cbm"),
+                        func.round(
+                            cast(func.coalesce(Pallet.weight_lbs, 0) / 2.20462, Numeric), 2
+                        ).label("weight_kg"),
+                        Pallet.pcs.label("pcs"),
+                    )
+                    .join(Pallet.container)
+                    .outerjoin(Pallet.shipment)
+                    .filter(Container.container_number == self.container_number)
+                )
+                
+                # delivery_type 过滤
+                if pallet_delivery_type_filter:
+                    pallet_query = pallet_query.filter(Pallet.delivery_type == pallet_delivery_type_filter)
+                # 唛头过滤
+                if self.is_mark_query and self.matched_shipping_mark:
+                    pallet_query = pallet_query.filter(Pallet.shipping_mark == self.matched_shipping_mark)
+                
+                pallet_records = pallet_query.all()
+                print(f"[Postport] Pallet查询结果行数: {len(pallet_records)}")
+                
+                # 标记这些是 pallet 记录
+                for r in pallet_records:
+                    all_records.append(('pallet', r))
             
-            # 3. 手动分组（按原始的分组键）
+            # 查询 PackingList 表（如果需要）
+            if query_packing_list:
+                print(f"[Postport] 查询PackingList表")
+                
+                # 查询 PackingList 数据
+                packing_list_query = (
+                    self.db_session.query(
+                        PackingList.destination,
+                        PackingList.PO_ID,
+                        PackingList.delivery_method,
+                        PackingList.note,
+                        PackingList.delivery_type,
+                        Shipment.shipment_batch_number,
+                        Shipment.is_shipment_schduled,
+                        Shipment.shipment_appointment_utc.label("shipment_schduled_at"),
+                        Shipment.shipment_appointment_utc.label("shipment_appointment"),
+                        Shipment.is_shipped,
+                        Shipment.shipped_at.label("shipped_at"),
+                        Shipment.is_arrived,
+                        Shipment.arrived_at.label("arrived_at"),
+                        Shipment.pod_link,
+                        Shipment.pod_uploaded_at,
+                        Shipment.shipping_order_link,
+                        Shipment.appointment_id,
+                        PackingList.id.label("id"),
+                        func.round(cast(func.coalesce(PackingList.cbm, 0), Numeric), 4).label("cbm"),
+                        func.round(
+                            cast(func.coalesce(PackingList.total_weight_kg, 0), Numeric), 2
+                        ).label("weight_kg"),
+                        PackingList.pcs.label("pcs"),
+                    )
+                    .join(PackingList.container)
+                    .outerjoin(PackingList.master_shipment_batch_number)
+                    .filter(Container.container_number == self.container_number)
+                )
+                
+                # delivery_type 过滤
+                if packing_list_delivery_type_filter:
+                    packing_list_query = packing_list_query.filter(PackingList.delivery_type == packing_list_delivery_type_filter)
+                # 唛头过滤
+                if self.is_mark_query and self.matched_shipping_mark:
+                    packing_list_query = packing_list_query.filter(PackingList.shipping_mark == self.matched_shipping_mark)
+                
+                packing_list_records = packing_list_query.all()
+                print(f"[Postport] PackingList查询结果行数: {len(packing_list_records)}")
+                
+                # 标记这些是 packing_list 记录
+                for r in packing_list_records:
+                    all_records.append(('packing_list', r))
+            
+            print(f"[Postport] 总记录数: {len(all_records)}")
+            
+            # 5. 手动分组（按原始的分组键）
             grouped_data = {}
-            for row in base_query:
+            for record_type, row in all_records:
                 # 分组键：destination、PO_ID、delivery_method、note、delivery_type、shipment_batch_number、is_shipment_schduled、shipment_appointment_utc、is_shipped、shipped_at_utc、is_arrived、arrived_at_utc、pod_link、pod_uploaded_at、shipping_order_link、appointment_id
                 key = (
                     row[0],  # destination
@@ -390,16 +559,18 @@ class OrderTracking:
                     row[16], # appointment_id
                 )
                 
-                pallet_id = row[17]  # 第18个元素是 pallet_id
+                item_id = row[17]  # 第18个元素是 id
                 if key not in grouped_data:
                     grouped_data[key] = {
                         'base_row': row,
-                        'pallet_ids': set(),
+                        'item_ids': set(),
+                        'is_pallet_record': set(),  # 记录每个 item 是 pallet 还是 packing_list
                         'total_cbm': 0.0,
                         'total_weight': 0.0,
                         'total_pcs': 0,
                     }
-                grouped_data[key]['pallet_ids'].add(pallet_id)
+                grouped_data[key]['item_ids'].add(item_id)
+                grouped_data[key]['is_pallet_record'].add(record_type == 'pallet')
                 grouped_data[key]['total_cbm'] += float(row[18]) if row[18] else 0
                 grouped_data[key]['total_weight'] += float(row[19]) if row[19] else 0
                 grouped_data[key]['total_pcs'] += int(row[20]) if row[20] else 0
@@ -415,21 +586,25 @@ class OrderTracking:
         data = []
         for row_idx, (key, group) in enumerate(grouped_data.items()):
             row = group['base_row']
-            pallet_ids = group['pallet_ids']
-            n_pallet = len(pallet_ids)
+            item_ids = group['item_ids']
+            n_pallet = len(item_ids)
             
-            # 检查是否有异常
+            # 检查是否有异常（只看 pallet 记录）
             has_exception = False
             exception_type = None
             exception_reason = None
-            print(f"[Postport] 第 {row_idx} 组数据 - pallet_ids: {list(pallet_ids)}")
-            for pid in pallet_ids:
-                if pid in pallet_exceptions:
-                    has_exception = True
-                    exception_type = pallet_exceptions[pid]['exception_type']
-                    exception_reason = pallet_exceptions[pid]['exception_reason']
-                    print(f"[Postport]   找到异常! pid={pid}, type={exception_type}")
-                    break
+            
+            # 先看一下这个组里有没有 pallet 记录
+            has_pallet_in_group = any(group['is_pallet_record'])
+            if has_pallet_in_group:
+                print(f"[Postport] 第 {row_idx} 组数据 - item_ids: {list(item_ids)}, 有pallet记录")
+                for pid in item_ids:
+                    if pid in pallet_exceptions:
+                        has_exception = True
+                        exception_type = pallet_exceptions[pid]['exception_type']
+                        exception_reason = pallet_exceptions[pid]['exception_reason']
+                        print(f"[Postport]   找到异常! pid={pid}, type={exception_type}")
+                        break
             
             data.append(
                 PalletShipmentSummary(

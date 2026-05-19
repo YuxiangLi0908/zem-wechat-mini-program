@@ -6,6 +6,8 @@ from app.data_models.db.user import Customer, AuthUser
 from app.data_models.db.container import Container
 from app.data_models.db.order import Order
 from app.data_models.db.pallet import Pallet
+from app.data_models.db.pallet_exception import PalletException
+from app.data_models.db.packing_list import PackingList
 from app.data_models.db.shipment import Shipment
 from app.data_models.db.vessel import Vessel
 from app.data_models.db.warehouse import Warehouse
@@ -20,6 +22,8 @@ __all__ = [
     "Container",
     "Order",
     "Pallet",
+    "PalletException",
+    "PackingList",
     "Shipment",
     "Vessel",
     "Warehouse",
